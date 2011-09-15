@@ -766,18 +766,30 @@
                       (into s xs))
                     s))
                 #{} args)
-        {uses :use requires :require requires-macros :require-macros :as params}
+        {uses :use requires :require uses-macros :use-macros requires-macros :require-macros :as params}
         (reduce (fn [m [k & libs]]
                   (assoc m k (into {}
                                    (mapcat (fn [[lib kw expr]]
-                                          (assert (and expr (or (= :as kw)
-                                                                (= :only kw)))
-                                                  "Only (:require [lib.ns :as alias]*) and (:use [lib.ns :only [names]]*) form supported")
-                                          (if (= :only kw)
-                                            (map vector expr (repeat lib))
-                                            [[expr lib]]))
-                                        libs))))
-                {} (remove (fn [[r]] (= r :refer-clojure)) args))]
+                                             (assert (or (and expr (or (= :as kw)
+                                                                       (= :only kw)))
+                                                         (= :use-macros k))
+                                                     "Only (:require [lib.ns :as alias]*) and (:use [lib.ns :only [names]]*) form supported")
+                                             (cond
+                                               (= :use-macros k) (do (require lib)
+                                                                     (let [ms (->> lib ns-publics
+                                                                                   (filter (comp :macro meta val)))
+                                                                           ms (if (= :only kw) (filter (comp (set expr) key) ms) ms)
+                                                                           ms (if (= :exclude kw) (remove (comp (set expr) key) ms) ms)]
+                                                                       [[lib ms]]))
+                                               (= :only kw) (map vector expr (repeat lib))
+                                               :else [[expr lib]]))
+                                           libs))))
+                {} (remove (fn [[r]] (= r :refer-clojure)) args))
+        uses-macros (do (assert (= (apply + (map (comp count val) uses-macros))
+                                   (count (into #{} (mapcat (comp (partial map first) val) uses-macros))))
+                                (str "The namespace " name " :uses-macros some macros from multiple Clojure namespaces; consider using :use and/or :exclude"))
+                        (into {} (mapcat val uses-macros)))
+        params (assoc params :use-macros uses-macros)]
     (set! *cljs-ns* name)
     (require 'cljs.core)
     (doseq [nsym (vals requires-macros)]
@@ -786,6 +798,7 @@
                            (assoc-in [name :name] name)
                            (assoc-in [name :excludes] excludes)
                            (assoc-in [name :uses] uses)
+                           (assoc-in [name :uses-macros] uses-macros)
                            (assoc-in [name :requires] requires)
                            (assoc-in [name :requires-macros]
                                      (into {} (map (fn [[alias nsym]]
@@ -865,7 +878,9 @@
                            :else
                            (-> env :ns :requires-macros (get (symbol nstr))))]
               (.findInternedVar ^clojure.lang.Namespace ns (symbol (name sym))))
-            (.findInternedVar ^clojure.lang.Namespace (find-ns 'cljs.core) sym)))]
+            (if-let [mvar (-> env :ns :uses-macros sym)]
+              mvar
+              (.findInternedVar ^clojure.lang.Namespace (find-ns 'cljs.core) sym))))]
     (when (and mvar (.isMacro ^clojure.lang.Var mvar))
       @mvar)))
 
