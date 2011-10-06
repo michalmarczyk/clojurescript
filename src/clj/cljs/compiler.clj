@@ -781,6 +781,17 @@
      (assert targetexpr "set! target must be a field or a symbol naming a var")
      {:env env :op :set! :target targetexpr :val valexpr :children [targetexpr valexpr]})))
 
+(defn expand-nested-libspecs [libspecs]
+  (letfn [(terminal? [spec]
+            (keyword? (second spec)))
+          (expand-with-prefix [prefix specs]
+            (mapcat (fn [spec]
+                      (if (terminal? spec)
+                        `([~(symbol (str prefix (when prefix ".") (first spec))) ~@(next spec)])
+                        (expand-with-prefix (str prefix (when prefix ".") (first spec)) (next spec))))
+                    specs))]
+    (map #(list* (first %) (expand-with-prefix nil (next %))) libspecs)))
+
 (defmethod parse 'ns
   [_ env [_ name & args] _]
   (let [excludes
@@ -807,7 +818,9 @@
                                                            "Only (:use [lib.ns :only [names]]*) form of :use / :use-macros is supported")
                                                    (map vector expr (repeat lib)))))
                                            libs))))
-                {} (remove (fn [[r]] (= r :refer-clojure)) args))]
+                {} (->> args
+                        (remove (fn [[r]] (= r :refer-clojure)))
+                        expand-nested-libspecs))]
     (set! *cljs-ns* name)
     (require 'cljs.core)
     (doseq [nsym (concat (vals requires-macros) (vals uses-macros))]
