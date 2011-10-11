@@ -9,11 +9,12 @@ for next in lib/*: src/clj: src/cljs: test/cljs; do
   CLJSC_CP=$CLJSC_CP$CLOJURESCRIPT_HOME'/'$next
 done
 
-while getopts l: f
+while true
 do
-    case $f in
-        l) CLJSC_CP="${CLJSC_CP}:${OPTARG}";;
-        \?) exit 1;;
+    if [ -z "$*" ]; then break; fi
+    case "$1" in
+        -l|-cp|--add-classpath) CLJSC_CP="${CLJSC_CP}:$2"; shift 2;;
+        *) exit 1;;
     esac
 done
 
