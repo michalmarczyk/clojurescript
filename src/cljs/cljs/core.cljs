@@ -3135,7 +3135,7 @@ reduces them without incurring seq initialization"
   "keyval => key val
   Returns a new hash map with supplied mappings."
   [& keyvals]
-  (loop [in (seq keyvals), out cljs.core.HashMap/EMPTY]
+  (loop [in (seq keyvals), out #_cljs.core.HashMap/EMPTY cljs.core.PersistentHashMap/EMPTY]
     (if in
       (recur (nnext in) (assoc out (first in) (second in)))
       out)))

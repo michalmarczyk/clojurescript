@@ -291,6 +291,12 @@
 (defmethod emit :map
   [{:keys [children env simple-keys? keys vals]}]
   (emit-wrap env
+    (print (str "cljs.core.PersistentHashMap.fromArrays(["
+                (comma-sep (map emits keys))
+                "],["
+                (comma-sep (map emits vals))
+                "])"))
+    #_
     (if simple-keys?
       (print (str "cljs.core.ObjMap.fromObject(["
                   (comma-sep (map emits keys)) ; keys
