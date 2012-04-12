@@ -483,6 +483,7 @@
         tempnames (map (comp gensym name) names)
         binds (map vector names vals)
         resets (reverse (map vector names tempnames))]
+    (cljs.compiler/confirm-bindings &env names)
     `(let [~@(interleave tempnames names)]
        (try
         ~@(map
