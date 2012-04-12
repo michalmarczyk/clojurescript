@@ -1017,6 +1017,10 @@ reduces them without incurring seq initialization"
   "Bitwise shift right"
   [x n] (cljs.core/bit-shift-right x n))
 
+(defn bit-shift-right-zero-fill
+  "Bitwise shift right with zero fill"
+  [x n] (cljs.core/bit-shift-right-zero-fill x n))
+
 (defn ^boolean ==
   "Returns non-nil if nums all have the equivalent
   value (type-independent), otherwise false"
@@ -2709,7 +2713,7 @@ reduces them without incurring seq initialization"
 (declare create-inode-seq create-array-node-seq reset! create-node atom deref)
 
 (defn- mask [hash shift]
-  (js* "((~{} >>> ~{}) & 0x01f)" hash shift))
+  (bit-and (bit-shift-right-zero-fill hash shift) 0x01f))
 
 (defn- clone-and-set
   ([arr i a]
@@ -2729,7 +2733,7 @@ reduces them without incurring seq initialization"
      to))
 
 (defn- remove-pair [arr i]
-  (let [new-arr (js* "(new Array(~{}))" (- (.-length arr) 2))]
+  (let [new-arr (make-array (- (.-length arr) 2))]
     (array-copy arr 0 new-arr 0 (* 2 i))
     (array-copy arr (* 2 (inc i)) new-arr (* 2 i) (- (.-length new-arr) (* 2 i)))
     new-arr))
@@ -2774,12 +2778,12 @@ reduces them without incurring seq initialization"
                                                        (create-node (+ shift 5) key-or-nil val-or-node hash key val))))))
         (let [n (bit-count bitmap)]
           (if (>= n 16)
-            (let [nodes (js* "(new Array(32))")
+            (let [nodes (make-array 32)
                   jdx   (mask hash shift)]
               (aset nodes jdx (-inode-assoc cljs.core.BitmapIndexedNode/EMPTY (+ shift 5) hash key val added-leaf))
               (loop [i 0 j 0]
                 (if (< i 32)
-                  (if (not (zero? (bit-and (js* "(~{} >>> ~{})" bitmap i) 1)))
+                  (if (not (zero? (bit-and (bit-shift-right-zero-fill bitmap i) 1)))
                     (do (aset nodes i
                               (if (nil? (aget arr j))
                                 (aget arr (inc j))
@@ -2788,7 +2792,7 @@ reduces them without incurring seq initialization"
                         (recur (inc i) (+ j 2)))
                     (recur (inc i) j))))
               (ArrayNode. (inc n) nodes))
-            (let [new-arr (js* "(new Array(~{}))" (* 2 (inc n)))]
+            (let [new-arr (make-array (* 2 (inc n)))]
               (array-copy arr 0 new-arr 0 (* 2 idx))
               (aset new-arr (* 2 idx) key)
               (reset! added-leaf true)
@@ -2838,12 +2842,12 @@ reduces them without incurring seq initialization"
   (-inode-seq [inode]
     (create-inode-seq arr)))
 
-(set! cljs.core.BitmapIndexedNode/EMPTY (BitmapIndexedNode. 0 (js* "(new Array(0))")))
+(set! cljs.core.BitmapIndexedNode/EMPTY (BitmapIndexedNode. 0 (make-array 0)))
 
 (defn- pack-array-node [array-node idx]
   (let [arr     (.-arr array-node)
         len     (* 2 (dec (.-cnt array-node)))
-        new-arr (js* "(new Array(~{}))" len)]
+        new-arr (make-array len)]
     (loop [i 0 j 1 bitmap 0]
       (if (< i len)
         (if (and (not (== i idx))
@@ -2919,7 +2923,7 @@ reduces them without incurring seq initialization"
             inode
             (HashCollisionNode. __hash cnt (clone-and-set arr (inc idx) val)))
           (let [len (.-length arr)
-                new-arr (js* "(new Array(~{}))" (+ len 2))]
+                new-arr (make-array (+ len 2))]
             (array-copy arr 0 new-arr 0 len)
             (aset new-arr len key)
             (aset new-arr (inc len) val)
@@ -2955,8 +2959,6 @@ reduces them without incurring seq initialization"
         (-> cljs.core.BitmapIndexedNode/EMPTY
             (-inode-assoc shift key1hash key1 val1 added-leaf)
             (-inode-assoc shift key2hash key2 val2 added-leaf))))))
-
-(def ^:private not-found-sentinel (js* "(new Object())"))
 
 (deftype NodeSeq [meta nodes i s]
   IMeta
@@ -3099,8 +3101,8 @@ reduces them without incurring seq initialization"
   (-contains-key? [coll k]
     (cond (nil? k)    has-nil?
           (nil? root) false
-          :else       (not (identical? (-inode-find root 0 (hash k) k not-found-sentinel)
-                                       not-found-sentinel))))
+          :else       (not (identical? (-inode-find root 0 (hash k) k lookup-sentinel)
+                                       lookup-sentinel))))
 
   IMap
   (-dissoc [coll k]

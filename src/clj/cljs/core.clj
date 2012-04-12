@@ -179,6 +179,9 @@
 (defmacro bit-shift-right [x n]
   (list 'js* "(~{} >> ~{})" x n))
 
+(defmacro bit-shift-right-zero-fill [x n]
+  (list 'js* "(~{} >>> ~{})" x n))
+
 (defmacro bit-set [x n]
   (list 'js* "(~{} | (1 << ~{}))" x n))
 
