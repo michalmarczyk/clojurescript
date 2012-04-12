@@ -2955,7 +2955,7 @@ reduces them without incurring seq initialization"
 (defn- create-node [shift key1 val1 key2hash key2 val2]
   (let [key1hash (hash key1)]
     (if (== key1hash key2hash)
-      (HashCollisionNode. key1hash 2 (js* "([~{}, ~{}, ~{}, ~{}])" key1 val1 key2 val2))
+      (HashCollisionNode. key1hash 2 (array key1 val1 key2 val2))
       (let [added-leaf? (atom false)]
         (-> cljs.core.BitmapIndexedNode/EMPTY
             (.inode-assoc shift key1hash key1 val1 added-leaf?)
@@ -3082,7 +3082,7 @@ reduces them without incurring seq initialization"
                         nil-val
                         not-found)
           (nil? root) not-found
-          :else       (nth (.inode-find root 0 (hash k) k (js* "([null, ~{}])" not-found)) 1)))
+          :else       (nth (.inode-find root 0 (hash k) k (array nil not-found)) 1)))
 
   IAssociative
   (-assoc [coll k v]
