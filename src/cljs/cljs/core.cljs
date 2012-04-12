@@ -2827,11 +2827,11 @@ reduces them without incurring seq initialization"
   (-inode-find [inode shift hash key not-found]
     (let [bit (bitpos hash shift)]
       (if (zero? (bit-and bitmap bit))
-        nil
+        not-found
         (let [idx         (bitmap-indexed-node-index bitmap bit)
               key-or-nil  (aget arr (* 2 idx))
               val-or-node (aget arr (inc (* 2 idx)))]
-          (cond (nil? key-or-nil)  (-inode-find val-or-node (+ shift 5) hash key)
+          (cond (nil? key-or-nil)  (-inode-find val-or-node (+ shift 5) hash key not-found)
                 (= key key-or-nil) [key-or-nil val-or-node]
                 :else not-found)))))
 
@@ -3079,7 +3079,7 @@ reduces them without incurring seq initialization"
                         nil-val
                         not-found)
           (nil? root) not-found
-          :else       (nth (-inode-find root 0 (hash k) k not-found) 1)))
+          :else       (nth (-inode-find root 0 (hash k) k (js* "([null, ~{}])" not-found)) 1)))
 
   IAssociative
   (-assoc [coll k v]
