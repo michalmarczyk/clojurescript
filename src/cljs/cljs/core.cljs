@@ -2759,7 +2759,30 @@ reduces them without incurring seq initialization"
   (inode-assoc [inode shift hash key val added-leaf?]
     (let [bit (bitpos hash shift)
           idx (bitmap-indexed-node-index bitmap bit)]
-      (if (not (zero? (bit-and bitmap bit)))
+      (if (zero? (bit-and bitmap bit))
+        (let [n (bit-count bitmap)]
+          (if (>= n 16)
+            (let [nodes (make-array 32)
+                  jdx   (mask hash shift)]
+              (aset nodes jdx (.inode-assoc cljs.core.BitmapIndexedNode/EMPTY (+ shift 5) hash key val added-leaf?))
+              (loop [i 0 j 0]
+                (if (< i 32)
+                  (if (zero? (bit-and (bit-shift-right-zero-fill bitmap i) 1))
+                    (recur (inc i) j)
+                    (do (aset nodes i
+                              (if (nil? (aget arr j))
+                                (aget arr (inc j))
+                                (.inode-assoc cljs.core.BitmapIndexedNode/EMPTY
+                                              (+ shift 5) (cljs.core/hash (aget arr j)) (aget arr j) (aget arr (inc j)) added-leaf?)))
+                        (recur (inc i) (+ j 2))))))
+              (ArrayNode. (inc n) nodes))
+            (let [new-arr (make-array (* 2 (inc n)))]
+              (array-copy arr 0 new-arr 0 (* 2 idx))
+              (aset new-arr (* 2 idx) key)
+              (aset added-leaf? 0 true)
+              (aset new-arr (inc (* 2 idx)) val)
+              (array-copy arr (* 2 idx) new-arr (* 2 (inc idx)) (* 2 (- n idx)))
+              (BitmapIndexedNode. (bit-or bitmap bit) new-arr))))
         (let [key-or-nil  (aget arr (* 2 idx))
               val-or-node (aget arr (inc (* 2 idx)))]
           (cond (nil? key-or-nil)
@@ -2777,30 +2800,7 @@ reduces them without incurring seq initialization"
                 (do (aset added-leaf? 0 true)
                     (BitmapIndexedNode. bitmap
                                         (clone-and-set arr (* 2 idx) nil (inc (* 2 idx))
-                                                       (create-node (+ shift 5) key-or-nil val-or-node hash key val))))))
-        (let [n (bit-count bitmap)]
-          (if (>= n 16)
-            (let [nodes (make-array 32)
-                  jdx   (mask hash shift)]
-              (aset nodes jdx (.inode-assoc cljs.core.BitmapIndexedNode/EMPTY (+ shift 5) hash key val added-leaf?))
-              (loop [i 0 j 0]
-                (if (< i 32)
-                  (if (not (zero? (bit-and (bit-shift-right-zero-fill bitmap i) 1)))
-                    (do (aset nodes i
-                              (if (nil? (aget arr j))
-                                (aget arr (inc j))
-                                (.inode-assoc cljs.core.BitmapIndexedNode/EMPTY
-                                              (+ shift 5) (cljs.core/hash (aget arr j)) (aget arr j) (aget arr (inc j)) added-leaf?)))
-                        (recur (inc i) (+ j 2)))
-                    (recur (inc i) j))))
-              (ArrayNode. (inc n) nodes))
-            (let [new-arr (make-array (* 2 (inc n)))]
-              (array-copy arr 0 new-arr 0 (* 2 idx))
-              (aset new-arr (* 2 idx) key)
-              (aset added-leaf? 0 true)
-              (aset new-arr (inc (* 2 idx)) val)
-              (array-copy arr (* 2 idx) new-arr (* 2 (inc idx)) (* 2 (- n idx)))
-              (BitmapIndexedNode. (bit-or bitmap bit) new-arr)))))))
+                                                       (create-node (+ shift 5) key-or-nil val-or-node hash key val)))))))))
 
   (inode-without [inode shift hash key]
     (let [bit (bitpos hash shift)]
@@ -2812,7 +2812,7 @@ reduces them without incurring seq initialization"
           (cond (nil? key-or-nil)
                 (let [n (.inode-without val-or-node (+ shift 5) hash key)]
                   (cond (identical? n val-or-node) inode
-                        (not (nil? n)) (BitmapIndexedNode. bitmap (clone-and-set arr (inc (* 2 idx)) n))
+                        (coercive-not= n nil) (BitmapIndexedNode. bitmap (clone-and-set arr (inc (* 2 idx)) n))
                         (== bitmap bit) nil
                         :else (BitmapIndexedNode. (bit-xor bitmap bit) (remove-pair arr idx))))
                 (= key key-or-nil)
@@ -2852,8 +2852,8 @@ reduces them without incurring seq initialization"
         new-arr (make-array len)]
     (loop [i 0 j 1 bitmap 0]
       (if (< i len)
-        (if (and (not (== i idx))
-                 (not (nil? (aget arr i))))
+        (if (and (coercive-not= i idx)
+                 (coercive-not= nil (aget arr i)))
           (do (aset new-arr j (aget arr i))
               (recur (inc i) (+ j 2) (bit-or bitmap (bit-shift-left 1 i))))
           (recur (inc i) j bitmap))
@@ -2892,16 +2892,16 @@ reduces them without incurring seq initialization"
   (inode-find [inode shift hash key]
     (let [idx  (mask hash shift)
           node (aget arr idx)]
-      (if (or (undefined? node) (nil? node))
-        nil
-        (.inode-find node (+ shift 5) hash key))))
+      (if (coercive-not= nil node)
+        (.inode-find node (+ shift 5) hash key)
+        nil)))
 
   (inode-find [inode shift hash key not-found]
     (let [idx  (mask hash shift)
           node (aget arr idx)]
-      (if (or (undefined? node) (nil? node))
-        not-found
-        (.inode-find node (+ shift 5) hash key not-found))))
+      (if (coercive-not= nil node)
+        (.inode-find node (+ shift 5) hash key not-found)
+        not-found)))
 
   (inode-seq [inode]
     (create-array-node-seq arr)))
@@ -2920,17 +2920,17 @@ reduces them without incurring seq initialization"
   (inode-assoc [inode shift hash key val added-leaf?]
     (if (== hash __hash)
       (let [idx (hash-collision-node-find-index arr cnt key)]
-        (if-not (== idx -1)
-          (if (= (aget arr idx) val)
-            inode
-            (HashCollisionNode. __hash cnt (clone-and-set arr (inc idx) val)))
+        (if (== idx -1)
           (let [len (.-length arr)
                 new-arr (make-array (+ len 2))]
             (array-copy arr 0 new-arr 0 len)
             (aset new-arr len key)
             (aset new-arr (inc len) val)
             (aset added-leaf? 0 true)
-            (HashCollisionNode. __hash (inc cnt) new-arr))))))
+            (HashCollisionNode. __hash (inc cnt) new-arr))
+          (if (= (aget arr idx) val)
+            inode
+            (HashCollisionNode. __hash cnt (clone-and-set arr (inc idx) val)))))))
 
   (inode-without [inode shift hash key]
     (let [idx (hash-collision-node-find-index arr cnt key)]
@@ -2991,19 +2991,18 @@ reduces them without incurring seq initialization"
   ([nodes]
      (create-inode-seq nodes 0 nil))
   ([nodes i s]
-     (if-not (nil? s)
-       (NodeSeq. nil nodes i s)
+     (if (nil? s)
        (let [len (.-length nodes)]
          (loop [j i]
            (if (< j len)
-             (if-not (let [nj (aget nodes j)]
-                       (or (nil? nj) (undefined? nj)))
+             (if (coercive-not= nil (aget nodes j))
                (NodeSeq. nil nodes j nil)
                (if-let [node (aget nodes (inc j))]
                  (if-let [node-seq (.inode-seq node)]
                    (NodeSeq. nil nodes (+ j 2) node-seq)
                    (recur (+ j 2)))
-                 (recur (+ j 2))))))))))
+                 (recur (+ j 2)))))))
+       (NodeSeq. nil nodes i s))))
 
 (deftype ArrayNodeSeq [meta nodes i s]
   IMeta
@@ -3026,8 +3025,7 @@ reduces them without incurring seq initialization"
 (defn- create-array-node-seq
   ([nodes] (create-array-node-seq nil nodes 0 nil))
   ([meta nodes i s]
-     (if-not (nil? s)
-       (ArrayNodeSeq. meta nodes i s)
+     (if (nil? s)
        (let [len (.-length nodes)]
          (loop [j i]
            (if (< j len)
@@ -3035,7 +3033,8 @@ reduces them without incurring seq initialization"
                (if-let [ns (.inode-seq nj)]
                  (ArrayNodeSeq. meta nodes (inc j) ns)
                  (recur (inc j)))
-               (recur (inc j)))))))))
+               (recur (inc j))))))
+       (ArrayNodeSeq. meta nodes i s))))
 
 (deftype PersistentHashMap [meta cnt root has-nil? nil-val]
   Object
@@ -3066,7 +3065,7 @@ reduces them without incurring seq initialization"
   ISeqable
   (-seq [coll]
     (when (pos? cnt)
-      (let [s (if-not (nil? root) (.inode-seq root))]
+      (let [s (if (coercive-not= nil root) (.inode-seq root))]
         (if has-nil?
           (cons [nil nil-val] s)
           s))))
