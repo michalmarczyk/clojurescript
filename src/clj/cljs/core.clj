@@ -52,6 +52,10 @@
 (defmacro coercive-not= [x y]
   (bool-expr (list 'js* "(~{} != ~{})" x y)))
 
+;; internal - do not use.
+(defmacro coercive-= [x y]
+  (bool-expr (list 'js* "(~{} == ~{})" x y)))
+
 (defmacro true? [x]
   (bool-expr (list 'js* "~{} === true" x)))
 
@@ -188,6 +192,14 @@
 
 (defmacro bit-set [x n]
   (list 'js* "(~{} | (1 << ~{}))" x n))
+
+;; internal
+(defmacro mask [hash shift]
+  (list 'js* "((~{} >>> ~{}) & 0x01f)" hash shift))
+
+;; internal
+(defmacro bitpos [hash shift]
+  (list 'js* "(1 << ~{})" `(mask ~hash ~shift)))
 
 (defn- protocol-prefix [psym]
   (str (.replace (str psym) \. \$) "$"))

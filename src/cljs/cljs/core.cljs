@@ -217,6 +217,17 @@
   (-add-watch [this key f])
   (-remove-watch [this key]))
 
+(defprotocol IEditableCollection
+  (-as-transient [coll]))
+
+(defprotocol ITransientCollection
+  (-conj! [tcoll val])
+  (-persistent! [tcoll]))
+
+(defprotocol ITransientAssociative
+  (-assoc! [tcoll key val])
+  (-dissoc! [tcoll key]))
+
 ;;;;;;;;;;;;;;;;;;; fundamentals ;;;;;;;;;;;;;;;
 (defn ^boolean identical?
   "Tests if 2 arguments are the same object"
@@ -2524,9 +2535,82 @@ reduces them without incurring seq initialization"
      (> a b) 1
      :else 0)))
 
-;;; ObjMap
-;;; DEPRECATED
-;;; in favor of PersistentHashMap
+(declare persistent! into! assoc! transient)
+
+(defn- obj-map->persistent-hash-map [obj-map]
+  (let [meta   (.-meta obj-map)
+        keys   (.-keys obj-map)
+        len    (.-length keys)
+        strobj (.-strobj obj-map)]
+    (with-meta (loop [i  0
+                      m  (transient cljs.core.PersistentHashMap/EMPTY)]
+                 (if (< i len)
+                   (let [k (aget keys i)]
+                     (recur (inc i) (assoc! m k (aget strobj k))))
+                   (persistent! m))))))
+
+(declare ObjMap)
+
+(deftype TransientObjMap [^:mutable edit
+                          ^:mutable cnt
+                          ^:mutable keys
+                          ^:mutable strobj]
+  ICounted
+  (-count [tcoll]
+    (if edit
+      cnt
+      (throw (js/Error. "count after persistent"))))
+
+  ILookup
+  (-lookup [tcoll k]
+    (-lookup tcoll k nil))
+
+  (-lookup [tcoll k not-found]
+    (obj-map-contains-key? k strobj (aget strobj k) not-found))
+  
+  ITransientCollection
+  (-conj! [tcoll o]
+    (if edit
+      (if (vector? o)
+        (if (== 2 (count o))
+          (.assoc! tcoll (nth o 0) (nth o 1))
+          (throw (js/Error. "Vector arg to map conj must be a pair")))
+        (loop [es (seq o) tcoll tcoll]
+          (if-let [e (first es)]
+            (recur (next es)
+                   (.assoc! tcoll (nth e 0) (nth e 1)))
+            tcoll)))
+      (throw (js/Error. "conj! after persistent"))))
+  
+  (-persistent! [tcoll]
+    (set! edit false)
+    (ObjMap. cnt keys strobj))
+
+  ITransientAssociative
+  (-assoc! [tcoll k v]
+    (if edit
+      (if (goog/isString k)
+        (if (obj-map-contains-key? k strobj)
+          (if (identical? (aget strobj k) v)
+            tcoll
+            (do (aset strobj k v) tcoll))
+          (do (aset keys cnt k)
+              (set! cnt (inc cnt))
+              (aset strobj k v)
+              tcoll))
+        (.assoc! (-as-transient (obj-map->persistent-hash-map tcoll)) k v))
+      (throw (js/Error. "assoc! after persistent!"))))
+
+  (-dissoc! [tcoll k]
+    (if edit
+      (if (obj-map-contains-key? k strobj)
+        (let [new-keys (aclone keys)]
+          (.splice new-keys (scan-array 1 k new-keys) 1)
+          (js-delete strobj k)
+          (set! keys new-keys))
+        tcoll)
+      (throw (js/Error. "dissoc! after persistent!")))))
+
 (deftype ObjMap [meta keys strobj]
   Object
   (toString [this]
@@ -2571,17 +2655,20 @@ reduces them without incurring seq initialization"
 
   IAssociative
   (-assoc [coll k v]
-    (if (goog/isString k)
-      (let [new-strobj (goog.object/clone strobj)
-            overwrite? (.hasOwnProperty new-strobj k)]
-        (aset new-strobj k v)
-        (if overwrite?
-          (ObjMap. meta keys new-strobj)     ; overwrite
-          (let [new-keys (aclone keys)] ; append
-            (.push new-keys k)
-            (ObjMap. meta new-keys new-strobj))))
-      ; non-string key. game over.
-      (with-meta (into (hash-map k v) (seq coll)) meta)))
+    (if (< (.-length keys) 128)
+      (if (goog/isString k)
+        (let [new-strobj (goog.object/clone strobj)
+              overwrite? (.hasOwnProperty new-strobj k)]
+          (aset new-strobj k v)
+          (if overwrite?
+            (ObjMap. meta keys new-strobj) ; overwrite
+            (let [new-keys (aclone keys)]  ; append
+              (.push new-keys k)
+              (ObjMap. meta new-keys new-strobj))))
+        ; non-string key. game over.
+        (assoc (obj-map->persistent-hash-map coll) k v))
+      ;; too many keys, switching to PersistentHashMap
+      (assoc (obj-map->persistent-hash-map coll) k v)))
   (-contains-key? [coll k]
     (obj-map-contains-key? k strobj))
 
@@ -2593,13 +2680,17 @@ reduces them without incurring seq initialization"
         (.splice new-keys (scan-array 1 k new-keys) 1)
         (js-delete new-strobj k)
         (ObjMap. meta new-keys new-strobj))
-      coll)) ; key not found, return coll unchanged
+      coll))                    ; key not found, return coll unchanged
 
   IFn
   (-invoke [coll k]
     (-lookup coll k))
   (-invoke [coll k not-found]
-    (-lookup coll k not-found)))
+    (-lookup coll k not-found))
+
+  IEditableCollection
+  (-as-transient [coll]
+    (TransientObjMap. true (.-length keys) (aclone keys) (goog.object/clone strobj))))
 
 (set! cljs.core.ObjMap/EMPTY (ObjMap. nil (array) (js-obj)))
 
@@ -2716,6 +2807,23 @@ reduces them without incurring seq initialization"
         (recur (inc i) (assoc out (aget ks i) (aget vs i)))
         out)))))
 
+;;; Transients
+
+(defn transient [coll]
+  (-as-transient coll))
+
+(defn persistent! [tcoll]
+  (-persistent! tcoll))
+
+(defn conj! [tcoll val]
+  (-conj! tcoll val))
+
+(defn assoc! [tcoll key val]
+  (-assoc! tcoll key val))
+
+(defn dissoc! [tcoll key]
+  (-dissoc! tcoll key))
+
 ;;; PersistentHashMap
 
 (declare create-inode-seq create-array-node-seq reset! create-node atom deref)
@@ -2735,10 +2843,18 @@ reduces them without incurring seq initialization"
 (defn- array-copy
   ([from i to j len]
      (loop [i i j j len len]
-       (when-not (zero? len)
-         (aset to j (aget from i))
-         (recur (inc i) (inc j) (dec len))))
-     to))
+       (if (zero? len)
+         to
+         (do (aset to j (aget from i))
+             (recur (inc i) (inc j) (dec len)))))))
+
+(defn- array-copy-downward
+  ([from i to j len]
+     (loop [i (+ i (dec len)) j (+ j (dec len)) len len]
+       (if (zero? len)
+         to
+         (do (aset to j (aget from i))
+             (recur (dec i) (dec j) (dec len)))))))
 
 (defn- remove-pair [arr i]
   (let [new-arr (make-array (- (.-length arr) 2))]
@@ -2752,32 +2868,25 @@ reduces them without incurring seq initialization"
 (defn- bitpos [hash shift]
   (bit-shift-left 1 (mask hash shift)))
 
+(defn- edit-and-set
+  ([inode edit i a]
+     (let [editable (.ensure-editable inode edit)]
+       (aset (.-arr editable) i a)
+       editable))
+  ([inode edit i a j b]
+     (let [editable (.ensure-editable inode edit)]
+       (aset (.-arr editable) i a)
+       (aset (.-arr editable) j b)
+       editable)))
+
 (declare ArrayNode)
 
-(deftype BitmapIndexedNode [bitmap arr]
+(deftype BitmapIndexedNode [edit ^:mutable bitmap ^:mutable arr]
   Object
   (inode-assoc [inode shift hash key val added-leaf?]
     (let [bit (bitpos hash shift)
           idx (bitmap-indexed-node-index bitmap bit)]
-      (if (not (zero? (bit-and bitmap bit)))
-        (let [key-or-nil  (aget arr (* 2 idx))
-              val-or-node (aget arr (inc (* 2 idx)))]
-          (cond (nil? key-or-nil)
-                (let [n (.inode-assoc val-or-node (+ shift 5) hash key val added-leaf?)]
-                  (if (identical? n val-or-node)
-                    inode
-                    (BitmapIndexedNode. bitmap (clone-and-set arr (inc (* 2 idx)) n))))
-
-                (= key key-or-nil)
-                (if (identical? val val-or-node)
-                  inode
-                  (BitmapIndexedNode. bitmap (clone-and-set arr (inc (* 2 idx)) val)))
-
-                :else
-                (do (aset added-leaf? 0 true)
-                    (BitmapIndexedNode. bitmap
-                                        (clone-and-set arr (* 2 idx) nil (inc (* 2 idx))
-                                                       (create-node (+ shift 5) key-or-nil val-or-node hash key val))))))
+      (if (zero? (bit-and bitmap bit))
         (let [n (bit-count bitmap)]
           (if (>= n 16)
             (let [nodes (make-array 32)
@@ -2785,22 +2894,40 @@ reduces them without incurring seq initialization"
               (aset nodes jdx (.inode-assoc cljs.core.BitmapIndexedNode/EMPTY (+ shift 5) hash key val added-leaf?))
               (loop [i 0 j 0]
                 (if (< i 32)
-                  (if (not (zero? (bit-and (bit-shift-right-zero-fill bitmap i) 1)))
+                  (if (zero? (bit-and (bit-shift-right-zero-fill bitmap i) 1))
+                    (recur (inc i) j)
                     (do (aset nodes i
-                              (if (nil? (aget arr j))
-                                (aget arr (inc j))
+                              (if (coercive-not= nil (aget arr j))
                                 (.inode-assoc cljs.core.BitmapIndexedNode/EMPTY
-                                              (+ shift 5) (cljs.core/hash (aget arr j)) (aget arr j) (aget arr (inc j)) added-leaf?)))
-                        (recur (inc i) (+ j 2)))
-                    (recur (inc i) j))))
-              (ArrayNode. (inc n) nodes))
+                                              (+ shift 5) (cljs.core/hash (aget arr j)) (aget arr j) (aget arr (inc j)) added-leaf?)
+                                (aget arr (inc j))))
+                        (recur (inc i) (+ j 2))))))
+              (ArrayNode. nil (inc n) nodes))
             (let [new-arr (make-array (* 2 (inc n)))]
               (array-copy arr 0 new-arr 0 (* 2 idx))
               (aset new-arr (* 2 idx) key)
               (aset added-leaf? 0 true)
               (aset new-arr (inc (* 2 idx)) val)
               (array-copy arr (* 2 idx) new-arr (* 2 (inc idx)) (* 2 (- n idx)))
-              (BitmapIndexedNode. (bit-or bitmap bit) new-arr)))))))
+              (BitmapIndexedNode. nil (bit-or bitmap bit) new-arr))))
+        (let [key-or-nil  (aget arr (* 2 idx))
+              val-or-node (aget arr (inc (* 2 idx)))]
+          (cond (coercive-= nil key-or-nil)
+                (let [n (.inode-assoc val-or-node (+ shift 5) hash key val added-leaf?)]
+                  (if (identical? n val-or-node)
+                    inode
+                    (BitmapIndexedNode. nil bitmap (clone-and-set arr (inc (* 2 idx)) n))))
+
+                (= key key-or-nil)
+                (if (identical? val val-or-node)
+                  inode
+                  (BitmapIndexedNode. nil bitmap (clone-and-set arr (inc (* 2 idx)) val)))
+
+                :else
+                (do (aset added-leaf? 0 true)
+                    (BitmapIndexedNode. nil bitmap
+                                        (clone-and-set arr (* 2 idx) nil (inc (* 2 idx))
+                                                       (create-node (+ shift 5) key-or-nil val-or-node hash key val)))))))))
 
   (inode-without [inode shift hash key]
     (let [bit (bitpos hash shift)]
@@ -2809,14 +2936,14 @@ reduces them without incurring seq initialization"
         (let [idx         (bitmap-indexed-node-index bitmap bit)
               key-or-nil  (aget arr (* 2 idx))
               val-or-node (aget arr (inc (* 2 idx)))]
-          (cond (nil? key-or-nil)
+          (cond (coercive-= nil key-or-nil)
                 (let [n (.inode-without val-or-node (+ shift 5) hash key)]
                   (cond (identical? n val-or-node) inode
-                        (not (nil? n)) (BitmapIndexedNode. bitmap (clone-and-set arr (inc (* 2 idx)) n))
+                        (coercive-not= nil n) (BitmapIndexedNode. nil bitmap (clone-and-set arr (inc (* 2 idx)) n))
                         (== bitmap bit) nil
-                        :else (BitmapIndexedNode. (bit-xor bitmap bit) (remove-pair arr idx))))
+                        :else (BitmapIndexedNode. nil (bit-xor bitmap bit) (remove-pair arr idx))))
                 (= key key-or-nil)
-                (BitmapIndexedNode. (bit-xor bitmap bit) (remove-pair arr idx))
+                (BitmapIndexedNode. nil (bit-xor bitmap bit) (remove-pair arr idx))
                 :else inode)))))
 
   (inode-find [inode shift hash key]
@@ -2826,8 +2953,8 @@ reduces them without incurring seq initialization"
         (let [idx         (bitmap-indexed-node-index bitmap bit)
               key-or-nil  (aget arr (* 2 idx))
               val-or-node (aget arr (inc (* 2 idx)))]
-          (cond (nil? key-or-nil)  (.inode-find val-or-node (+ shift 5) hash key)
-                (= key key-or-nil) [key-or-nil val-or-node]
+          (cond (coercive-= nil key-or-nil) (.inode-find val-or-node (+ shift 5) hash key)
+                (= key key-or-nil)          [key-or-nil val-or-node]
                 :else nil)))))
 
   (inode-find [inode shift hash key not-found]
@@ -2837,45 +2964,147 @@ reduces them without incurring seq initialization"
         (let [idx         (bitmap-indexed-node-index bitmap bit)
               key-or-nil  (aget arr (* 2 idx))
               val-or-node (aget arr (inc (* 2 idx)))]
-          (cond (nil? key-or-nil)  (.inode-find val-or-node (+ shift 5) hash key not-found)
-                (= key key-or-nil) [key-or-nil val-or-node]
+          (cond (coercive-= nil key-or-nil) (.inode-find val-or-node (+ shift 5) hash key not-found)
+                (= key key-or-nil)          [key-or-nil val-or-node]
                 :else not-found)))))
 
   (inode-seq [inode]
-    (create-inode-seq arr)))
+    (create-inode-seq arr))
 
-(set! cljs.core.BitmapIndexedNode/EMPTY (BitmapIndexedNode. 0 (make-array 0)))
+  (ensure-editable [inode e]
+    (if (identical? e edit)
+      inode
+      (let [n       (bit-count bitmap)
+            new-arr (make-array (if (neg? n) 4 (* 2 (inc n))))]
+        (array-copy arr 0 new-arr 0 (* 2 n))
+        (BitmapIndexedNode. e bitmap new-arr))))
 
-(defn- pack-array-node [array-node idx]
+  (edit-and-remove-pair [inode e bit i]
+    (if (== bitmap bit)
+      nil
+      (let [editable (.ensure-editable inode e)
+            earr     (.-arr editable)
+            len      (.-length earr)]
+        (set! (.-bitmap editable) (bit-xor bit (.-bitmap editable)))
+        (array-copy earr (* 2 (inc i))
+                    earr (* 2 i)
+                    (- len (* 2 (inc i))))
+        (aset earr (- len 2) nil)
+        (aset earr (dec len) nil)
+        editable)))
+
+  (inode-assoc! [inode edit shift hash key val added-leaf?]
+    (let [bit (bitpos hash shift)
+          idx (bitmap-indexed-node-index bitmap bit)]
+      (if (zero? (bit-and bitmap bit))
+        (let [n (bit-count bitmap)]
+          (cond
+            (< (* 2 n) (.-length arr))
+            (let [editable (.ensure-editable inode edit)
+                  earr     (.-arr editable)]
+              (aset added-leaf? 0 true)
+              (array-copy-downward earr (* 2 idx)
+                                   earr (* 2 (inc idx))
+                                   (* 2 (- n idx)))
+              (aset earr (* 2 idx) key)
+              (aset earr (inc (* 2 idx)) val)
+              (set! (.-bitmap editable) (bit-or (.-bitmap editable) bit))
+              editable)
+
+            (>= n 16)
+            (let [nodes (make-array 32)
+                  jdx   (mask hash shift)]
+              (aset nodes jdx (.inode-assoc! cljs.core.BitmapIndexedNode/EMPTY edit (+ shift 5) hash key val added-leaf?))
+              (loop [i 0 j 0]
+                (if (< i 32)
+                  (if (zero? (bit-and (bit-shift-right-zero-fill bitmap i) 1))
+                    (recur (inc i) j)
+                    (do (aset nodes i
+                              (if (coercive-not= nil (aget arr j))
+                                (.inode-assoc! cljs.core.BitmapIndexedNode/EMPTY
+                                               edit (+ shift 5) (cljs.core/hash (aget arr j)) (aget arr j) (aget arr (inc j)) added-leaf?)
+                                (aget arr (inc j))))
+                        (recur (inc i) (+ j 2))))))
+              (ArrayNode. edit (inc n) nodes))
+
+            :else
+            (let [new-arr (make-array (* 2 (+ n 4)))]
+              (array-copy arr 0 new-arr 0 (* 2 idx))
+              (aset new-arr (* 2 idx) key)
+              (aset added-leaf? 0 true)
+              (aset new-arr (inc (* 2 idx)) val)
+              (array-copy arr (* 2 idx) new-arr (* 2 (inc idx)) (* 2 (- n idx)))
+              (let [editable (.ensure-editable inode edit)]
+                (set! (.-arr editable) new-arr)
+                (set! (.-bitmap editable) (bit-or (.-bitmap editable) bit))
+                editable))))
+        (let [key-or-nil  (aget arr (* 2 idx))
+              val-or-node (aget arr (inc (* 2 idx)))]
+          (cond (coercive-= nil key-or-nil)
+                (let [n (.inode-assoc! val-or-node edit (+ shift 5) hash key val added-leaf?)]
+                  (if (identical? n val-or-node)
+                    inode
+                    (edit-and-set inode edit (inc (* 2 idx)) val)))
+
+                (= key key-or-nil)
+                (if (identical? val val-or-node)
+                  inode
+                  (edit-and-set inode edit (inc (* 2 idx)) val))
+
+                :else
+                (do (aset added-leaf? 0 true)
+                    (edit-and-set inode edit (* 2 idx) nil (inc (* 2 idx))
+                                  (create-node edit (+ shift 5) key-or-nil val-or-node hash key val))))))))
+
+  (inode-without! [inode edit shift hash key removed-leaf?]
+    (let [bit (bitpos hash shift)]
+      (if (zero? (bit-and bitmap bit))
+        inode
+        (let [idx         (bitmap-indexed-node-index bitmap bit)
+              key-or-nil  (aget arr (* 2 idx))
+              val-or-node (aget arr (inc (* 2 idx)))]
+          (cond (coercive-= nil key-or-nil)
+                (let [n (.inode-without! val-or-node edit (+ shift 5) hash key removed-leaf?)]
+                  (cond (identical? n val-or-node) inode
+                        (coercive-not= nil n) (edit-and-set inode edit (inc (* 2 idx)) n)
+                        (== bitmap bit) nil
+                        :else (.edit-and-remove-pair inode edit bit idx)))
+                (= key key-or-nil)
+                (do (aset removed-leaf? 0 true)
+                    (.edit-and-remove-pair inode edit bit idx))
+                :else inode))))))
+
+(set! cljs.core.BitmapIndexedNode/EMPTY (BitmapIndexedNode. nil 0 (make-array 0)))
+
+(defn- pack-array-node [array-node edit idx]
   (let [arr     (.-arr array-node)
         len     (* 2 (dec (.-cnt array-node)))
         new-arr (make-array len)]
     (loop [i 0 j 1 bitmap 0]
       (if (< i len)
-        (if (and (not (== i idx))
-                 (not (nil? (aget arr i))))
+        (if (and (coercive-not= i idx)
+                 (coercive-not= nil (aget arr i)))
           (do (aset new-arr j (aget arr i))
               (recur (inc i) (+ j 2) (bit-or bitmap (bit-shift-left 1 i))))
           (recur (inc i) j bitmap))
-        (BitmapIndexedNode. bitmap new-arr)))))
+        (BitmapIndexedNode. edit bitmap new-arr)))))
 
-(deftype ArrayNode [cnt arr]
+(deftype ArrayNode [edit ^:mutable cnt ^:mutable arr]
   Object
   (inode-assoc [inode shift hash key val added-leaf?]
     (let [idx  (mask hash shift)
           node (aget arr idx)]
-      (if (or (nil? node) (undefined? node))
-        (ArrayNode. (inc cnt) (clone-and-set arr idx (.inode-assoc cljs.core.BitmapIndexedNode/EMPTY (+ shift 5) hash key val added-leaf?)))
+      (if (coercive-= nil node)
+        (ArrayNode. nil (inc cnt) (clone-and-set arr idx (.inode-assoc cljs.core.BitmapIndexedNode/EMPTY (+ shift 5) hash key val added-leaf?)))
         (let [n (.inode-assoc node (+ shift 5) hash key val added-leaf?)]
           (if (identical? n node)
             inode
-            (ArrayNode. cnt (clone-and-set arr idx n)))))))
+            (ArrayNode. nil cnt (clone-and-set arr idx n)))))))
 
   (inode-without [inode shift hash key]
     (let [idx  (mask hash shift)
           node (aget arr idx)]
-      (if (nil? node)
-        inode
+      (if (coercive-not= nil node)
         (let [n (.inode-without node (+ shift 5) hash key)]
           (cond
             (identical? n node)
@@ -2884,27 +3113,65 @@ reduces them without incurring seq initialization"
             (nil? n)
             (if (<= cnt 8)
               (pack-array-node inode idx)
-              (ArrayNode. (dec cnt) (clone-and-set arr idx n)))
+              (ArrayNode. nil (dec cnt) (clone-and-set arr idx n)))
 
             :else
-            (ArrayNode. cnt (clone-and-set arr idx n)))))))
+            (ArrayNode. nil cnt (clone-and-set arr idx n))))
+        inode)))
 
   (inode-find [inode shift hash key]
     (let [idx  (mask hash shift)
           node (aget arr idx)]
-      (if (or (undefined? node) (nil? node))
-        nil
-        (.inode-find node (+ shift 5) hash key))))
+      (if (coercive-not= nil node)
+        (.inode-find node (+ shift 5) hash key)
+        nil)))
 
   (inode-find [inode shift hash key not-found]
     (let [idx  (mask hash shift)
           node (aget arr idx)]
-      (if (or (undefined? node) (nil? node))
-        not-found
-        (.inode-find node (+ shift 5) hash key not-found))))
+      (if (coercive-not= nil node)
+        (.inode-find node (+ shift 5) hash key not-found)
+        not-found)))
 
   (inode-seq [inode]
-    (create-array-node-seq arr)))
+    (create-array-node-seq arr))
+
+  (ensure-editable [inode e]
+    (if (identical? e edit)
+      inode
+      (ArrayNode. e cnt (aclone arr))))
+
+  (inode-assoc! [inode edit shift hash key val added-leaf?]
+    (let [idx  (mask hash shift)
+          node (aget arr idx)]
+      (if (coercive-= nil node)
+        (let [editable (edit-and-set inode edit idx (.inode-assoc! cljs.core.BitmapIndexedNode/EMPTY edit (+ shift 5) hash key val added-leaf?))]
+          (set! (.-cnt editable) (inc (.-cnt editable)))
+          editable)
+        (let [n (.inode-assoc! node edit (+ shift 5) hash key val added-leaf?)]
+          (if (identical? n node)
+            inode
+            (edit-and-set inode edit idx n))))))
+
+  (inode-without! [inode edit shift hash key removed-leaf?]
+    (let [idx  (mask hash shift)
+          node (aget arr idx)]
+      (if (coercive-= nil node)
+        inode
+        (let [n (.inode-without! node edit (+ shift 5) hash key removed-leaf?)]
+          (cond
+            (identical? n node)
+            inode
+
+            (coercive-= nil n)
+            (if (<= cnt 8)
+              (pack-array-node inode edit idx)
+              (let [editable (edit-and-set inode edit idx n)]
+                (set! (.-cnt editable) (dec (.-cnt editable)))
+                editable))
+
+            :else
+            (edit-and-set inode edit idx n)))))))
 
 (defn- hash-collision-node-find-index [arr cnt key]
   (let [lim (* 2 cnt)]
@@ -2915,28 +3182,33 @@ reduces them without incurring seq initialization"
           (recur (+ i 2)))
         -1))))
 
-(deftype HashCollisionNode [__hash cnt arr]
+(deftype HashCollisionNode [edit
+                            ^:mutable __hash
+                            ^:mutable cnt
+                            ^:mutable arr]
   Object
   (inode-assoc [inode shift hash key val added-leaf?]
     (if (== hash __hash)
       (let [idx (hash-collision-node-find-index arr cnt key)]
-        (if-not (== idx -1)
-          (if (= (aget arr idx) val)
-            inode
-            (HashCollisionNode. __hash cnt (clone-and-set arr (inc idx) val)))
+        (if (== idx -1)
           (let [len (.-length arr)
                 new-arr (make-array (+ len 2))]
             (array-copy arr 0 new-arr 0 len)
             (aset new-arr len key)
             (aset new-arr (inc len) val)
             (aset added-leaf? 0 true)
-            (HashCollisionNode. __hash (inc cnt) new-arr))))))
+            (HashCollisionNode. nil __hash (inc cnt) new-arr))
+          (if (= (aget arr idx) val)
+            inode
+            (HashCollisionNode. nil __hash cnt (clone-and-set arr (inc idx) val)))))
+      (.inode-assoc (BitmapIndexedNode. nil (bitpos __hash shift) (array nil inode))
+                    shift hash key val added-leaf?)))
 
   (inode-without [inode shift hash key]
     (let [idx (hash-collision-node-find-index arr cnt key)]
       (cond (== idx -1) inode
             (== cnt 1)  nil
-            :else (HashCollisionNode. __hash (dec cnt) (remove-pair arr (quot idx 2))))))
+            :else (HashCollisionNode. nil __hash (dec cnt) (remove-pair arr (quot idx 2))))))
 
   (inode-find [inode shift hash key]
     (let [idx (hash-collision-node-find-index arr cnt key)]
@@ -2951,16 +3223,77 @@ reduces them without incurring seq initialization"
             :else                  not-found)))
 
   (inode-seq [inode]
-    (create-inode-seq arr)))
+    (create-inode-seq arr))
 
-(defn- create-node [shift key1 val1 key2hash key2 val2]
-  (let [key1hash (hash key1)]
-    (if (== key1hash key2hash)
-      (HashCollisionNode. key1hash 2 (array key1 val1 key2 val2))
-      (let [added-leaf? (array false)]
-        (-> cljs.core.BitmapIndexedNode/EMPTY
-            (.inode-assoc shift key1hash key1 val1 added-leaf?)
-            (.inode-assoc shift key2hash key2 val2 added-leaf?))))))
+  (ensure-editable [inode e]
+    (if (identical? e edit)
+      inode
+      (let [new-arr (make-array (* 2 (inc cnt)))]
+        (array-copy arr 0 new-arr 0 (* 2 cnt))
+        (HashCollisionNode. e __hash cnt new-arr))))
+
+  (ensure-editable [inode e count array]
+    (if (identical? e edit)
+      (do (set! arr array)
+          (set! cnt count)
+          inode)
+      (HashCollisionNode. edit __hash count array)))
+
+  (inode-assoc! [inode edit shift hash key val added-leaf?]
+    (if (== hash __hash)
+      (let [idx (hash-collision-node-find-index arr cnt key)]
+        (if (== idx -1)
+          (if (> (.-length arr) (* 2 cnt))
+            (let [editable (edit-and-set inode edit (* 2 cnt) key (inc (* 2 cnt)) val)]
+              (aset added-leaf? 0 true)
+              (set! (.-cnt editable) (inc (.-cnt editable)))
+              editable)
+            (let [len     (.-length arr)
+                  new-arr (make-array (+ len 2))]
+              (array-copy arr 0 new-arr 0 len)
+              (aset new-arr len key)
+              (aset new-arr (inc len) val)
+              (aset added-leaf? 0 true)
+              (.ensure-editable inode edit (inc cnt) new-arr)))
+          (if (= (aget arr (inc idx)) val)
+            inode
+            (edit-and-set inode edit (inc idx) val))))
+      (.inode-assoc! (BitmapIndexedNode. edit (bitpos __hash shift) (array nil inode nil nil))
+                     edit shift hash key val added-leaf?)))
+
+  (inode-without! [inode edit shift hash key removed-leaf?]
+    (let [idx (hash-collision-node-find-index arr cnt key)]
+      (if (== idx -1)
+        inode
+        (do (aset removed-leaf? 0 true)
+            (if (== cnt 1)
+              nil
+              (let [editable (.ensure-editable inode edit)
+                    earr     (.-arr editable)]
+                (aset earr idx (aget earr (- (* 2 cnt) 2)))
+                (aset earr (inc idx) (aget earr (dec (* 2 cnt))))
+                (aset earr (dec (* 2 cnt)) nil)
+                (aset earr (- (* 2 cnt) 2) nil)
+                (set! (.-cnt editable) (dec (.-cnt editable)))
+                editable)))))))
+
+(defn- create-node
+  ([shift key1 val1 key2hash key2 val2]
+     (let [key1hash (hash key1)]
+       (if (== key1hash key2hash)
+         (HashCollisionNode. nil key1hash 2 (array key1 val1 key2 val2))
+         (let [added-leaf? (array false)]
+           (-> cljs.core.BitmapIndexedNode/EMPTY
+               (.inode-assoc shift key1hash key1 val1 added-leaf?)
+               (.inode-assoc shift key2hash key2 val2 added-leaf?))))))
+  ([edit shift key1 val1 key2hash key2 val2]
+     (let [key1hash (hash key1)]
+       (if (== key1hash key2hash)
+         (HashCollisionNode. nil key1hash 2 (array key1 val1 key2 val2))
+         (let [added-leaf? (array false)]
+           (-> cljs.core.BitmapIndexedNode/EMPTY
+               (.inode-assoc! edit shift key1hash key1 val1 added-leaf?)
+               (.inode-assoc! edit shift key2hash key2 val2 added-leaf?)))))))
 
 (deftype NodeSeq [meta nodes i s]
   IMeta
@@ -2991,19 +3324,18 @@ reduces them without incurring seq initialization"
   ([nodes]
      (create-inode-seq nodes 0 nil))
   ([nodes i s]
-     (if-not (nil? s)
-       (NodeSeq. nil nodes i s)
+     (if (nil? s)
        (let [len (.-length nodes)]
          (loop [j i]
            (if (< j len)
-             (if-not (let [nj (aget nodes j)]
-                       (or (nil? nj) (undefined? nj)))
+             (if (coercive-not= nil (aget nodes j))
                (NodeSeq. nil nodes j nil)
                (if-let [node (aget nodes (inc j))]
                  (if-let [node-seq (.inode-seq node)]
                    (NodeSeq. nil nodes (+ j 2) node-seq)
                    (recur (+ j 2)))
-                 (recur (+ j 2))))))))))
+                 (recur (+ j 2)))))))
+       (NodeSeq. nil nodes i s))))
 
 (deftype ArrayNodeSeq [meta nodes i s]
   IMeta
@@ -3026,8 +3358,7 @@ reduces them without incurring seq initialization"
 (defn- create-array-node-seq
   ([nodes] (create-array-node-seq nil nodes 0 nil))
   ([meta nodes i s]
-     (if-not (nil? s)
-       (ArrayNodeSeq. meta nodes i s)
+     (if (nil? s)
        (let [len (.-length nodes)]
          (loop [j i]
            (if (< j len)
@@ -3035,7 +3366,10 @@ reduces them without incurring seq initialization"
                (if-let [ns (.inode-seq nj)]
                  (ArrayNodeSeq. meta nodes (inc j) ns)
                  (recur (inc j)))
-               (recur (inc j)))))))))
+               (recur (inc j))))))
+       (ArrayNodeSeq. meta nodes i s))))
+
+(declare TransientHashMap)
 
 (deftype PersistentHashMap [meta cnt root has-nil? nil-val]
   Object
@@ -3066,7 +3400,7 @@ reduces them without incurring seq initialization"
   ISeqable
   (-seq [coll]
     (when (pos? cnt)
-      (let [s (if-not (nil? root) (.inode-seq root))]
+      (let [s (if (coercive-not= nil root) (.inode-seq root))]
         (if has-nil?
           (cons [nil nil-val] s)
           s))))
@@ -3123,26 +3457,133 @@ reduces them without incurring seq initialization"
     (-lookup coll k))
 
   (-invoke [coll k not-found]
-    (-lookup coll k not-found)))
+    (-lookup coll k not-found))
+
+  IEditableCollection
+  (-as-transient [coll]
+    (TransientHashMap. (js-obj) root cnt has-nil? nil-val)))
 
 (set! cljs.core.PersistentHashMap/EMPTY (PersistentHashMap. nil 0 nil false nil))
 
 (set! cljs.core.PersistentHashMap/fromArrays
       (fn [ks vs]
         (let [len (.-length ks)]
-          (loop [i 0 out cljs.core.PersistentHashMap/EMPTY]
+          (loop [i 0 out (transient cljs.core.PersistentHashMap/EMPTY)]
             (if (< i len)
-              (recur (inc i) (assoc out (aget ks i) (aget vs i)))
-              out)))))
+              (recur (inc i) (assoc! out (aget ks i) (aget vs i)))
+              (persistent! out))))))
+
+(deftype TransientHashMap [^:mutable edit
+                           ^:mutable root
+                           ^:mutable count
+                           ^:mutable has-nil?
+                           ^:mutable nil-val]
+  Object
+  (conj! [tcoll o]
+    (if edit
+      (if (vector? o)
+        (if (== 2 (count o))
+          (.assoc! tcoll (nth o 0) (nth o 1))
+          (throw (js/Error. "Vector arg to map conj must be a pair")))
+        (loop [es (seq o) tcoll tcoll]
+          (if-let [e (first es)]
+            (recur (next es)
+                   (.assoc! tcoll (nth e 0) (nth e 1)))
+            tcoll)))
+      (throw (js/Error. "conj! after persistent"))))
+
+  (assoc! [tcoll k v]
+    (if edit
+      (if (nil? k)
+        (do (if (identical? nil-val v)
+              nil
+              (set! nil-val v))
+            (if has-nil?
+              nil
+              (do (set! count (inc count))
+                  (set! has-nil? true)))
+            tcoll)
+        (let [added-leaf? (array false)
+              node        (-> (if (nil? root)
+                                cljs.core.BitmapIndexedNode/EMPTY
+                                root)
+                              (.inode-assoc! edit 0 (hash k) k v added-leaf?))]
+          (if (identical? node root)
+            nil
+            (set! root node))
+          (if (aget added-leaf? 0)
+            (set! count (inc count)))
+          tcoll))
+      (throw (js/Error. "assoc! after persistent!"))))
+
+  (without! [tcoll k]
+    (if edit
+      (if (nil? k)
+        (if has-nil?
+          (do (set! has-nil? false)
+              (set! nil-val nil)
+              (set! count (dec count))
+              tcoll)
+          tcoll)
+        (if (nil? root)
+          tcoll
+          (let [removed-leaf? (array false)
+                node (.inode-without! root edit 0 (hash k) k removed-leaf?)]
+            (if (identical? node root)
+              (set! root node))
+            (if (aget removed-leaf? 0)
+              (set! count (dec count)))
+            tcoll)))
+      (throw (js/Error. "dissoc! after persistent!"))))
+
+  (persistent! [tcoll]
+    (if edit
+      (do (set! edit nil)
+          (PersistentHashMap. nil count root has-nil? nil-val))
+      (throw (js/Error. "persistent! called twice"))))
+
+  ICounted
+  (-count [coll]
+    (if edit
+      count
+      (throw (js/Error. "count after persistent!"))))
+
+  ILookup
+  (-lookup [tcoll k]
+    (if (nil? k)
+      (if has-nil?
+        nil-val)
+      (if (nil? root)
+        nil
+        (aget (.inode-find root 0 (hash k) k) 1))))
+
+  (-lookup [tcoll k not-found]
+    (if (nil? k)
+      (if has-nil?
+        nil-val
+        not-found)
+      (if (nil? root)
+        not-found
+        (aget (.inode-find root 0 (hash k) k not-found) 1))))
+
+  ITransientCollection
+  (-conj! [tcoll val] (.conj! tcoll val))
+
+  (-persistent! [tcoll] (.persistent! tcoll))
+
+  ITransientAssociative
+  (-assoc! [tcoll key val] (.assoc! tcoll key val))
+
+  (-dissoc! [tcoll key] (.without! tcoll key)))
 
 (defn hash-map
   "keyval => key val
   Returns a new hash map with supplied mappings."
   [& keyvals]
-  (loop [in (seq keyvals), out cljs.core.PersistentHashMap/EMPTY]
+  (loop [in (seq keyvals), out (transient cljs.core.PersistentHashMap/EMPTY)]
     (if in
-      (recur (nnext in) (assoc out (first in) (second in)))
-      out)))
+      (recur (nnext in) (assoc! out (first in) (second in)))
+      (persistent! out))))
 
 (defn keys
   "Returns a sequence of the map's keys."
