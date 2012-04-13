@@ -48,6 +48,10 @@
 (defmacro nil? [x]
   `(identical? ~x nil))
 
+;; internal - do not use.
+(defmacro coercive-not= [x y]
+  (bool-expr (list 'js* "(~{} != ~{})" x y)))
+
 (defmacro true? [x]
   (bool-expr (list 'js* "~{} === true" x)))
 
