@@ -4373,6 +4373,33 @@ reduces them without incurring seq initialization"
              :else x))]
     (f x)))
 
+(defn clj->js
+  "Recursively transforms ClojureScript vectors into JavaScript arrays
+  and ClojureScript maps into JavaScript objects. With option
+  ':stringify-keys true' will convert map keys from keywords / symbols
+  to strings. Throws an Error on maps with complex keys (i.e. of type
+  other than string)."
+  [x & options]
+  (let [{:keys [stringify-keys]} options
+        keyfn (if stringify-keys name identity)
+        f (fn thisfn [x]
+            (cond
+              (seq? x) (loop [x x arr (array)]
+                         (if (seq x)
+                           (recur (next x) (.push arr (thisfn (first x))))
+                           arr))
+              (vector? x) (let [cnt (count x)]
+                            (loop [i 0 arr (array)]
+                              (if (< i cnt)
+                                (recur (inc i) (.push arr (thisfn (nth x i))))
+                                arr)))
+              (map? x) (reduce (fn [o [k v]]
+                                 (if (goog/isString k)
+                                   (aset o (keyfn k) (thisfn v))
+                                   (throw (js/Error. "non-string key in map passed to clj->js")))))
+              :else x))]
+    (f x)))
+
 (defn memoize
   "Returns a memoized version of a referentially transparent function. The
   memoized version of the function keeps a cache of the mapping from arguments
