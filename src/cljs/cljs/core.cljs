@@ -2670,8 +2670,7 @@ reduces them without incurring seq initialization"
      :else 0)))
 
 ;;; ObjMap
-;;; DEPRECATED
-;;; in favor of PersistentHashMap
+
 (deftype ObjMap [meta keys strobj]
   Object
   (toString [this]
@@ -2717,14 +2716,19 @@ reduces them without incurring seq initialization"
   IAssociative
   (-assoc [coll k v]
     (if (goog/isString k)
-      (let [new-strobj (goog.object/clone strobj)
-            overwrite? (.hasOwnProperty new-strobj k)]
-        (aset new-strobj k v)
+      (let [overwrite? (.hasOwnProperty strobj k)]
         (if overwrite?
-          (ObjMap. meta keys new-strobj)     ; overwrite
-          (let [new-keys (aclone keys)] ; append
-            (.push new-keys k)
-            (ObjMap. meta new-keys new-strobj))))
+          (let [new-strobj (goog.object/clone strobj)]
+            (aset new-strobj k v)
+            (ObjMap. meta keys new-strobj)) ; overwrite
+          (if (< (.-length keys) 16)
+            (let [new-strobj (goog.object/clone strobj) ; append
+                  new-keys (aclone keys)]
+              (aset new-strobj k v)
+              (.push new-keys k)
+              (ObjMap. meta new-keys new-strobj))
+            ;; too many keys, switching to PersistentHashMap
+            (with-meta (into (hash-map k v) (seq coll)) meta))))
       ; non-string key. game over.
       (with-meta (into (hash-map k v) (seq coll)) meta)))
   (-contains-key? [coll k]
