@@ -1209,29 +1209,48 @@ reduces them without incurring seq initialization"
                    (bit-shift-left seed 6)
                    (bit-shift-right seed 2))))
 
+(def ^:private hash-cache-key "__cljs__hash")
+
 (defn- hash-coll [coll]
-  (reduce #(hash-combine %1 (hash %2)) (hash (first coll)) (next coll)))
+  (let [h (aget coll hash-cache-key)]
+    (if h
+      h
+      (let [h (reduce #(hash-combine %1 (hash %2))
+                      (hash (first coll))
+                      (next coll))]
+        (aset coll hash-cache-key h)
+        h))))
 
 (declare key val)
 
 (defn- hash-imap [m]
   ;; a la clojure.lang.APersistentMap
-  (loop [h 0 s (seq m)]
-    (if s
-      (let [e (first s)]
-        (recur (mod (+ h (bit-xor (hash (key e)) (hash (val e))))
-                    4503599627370496)
-               (next s)))
-      h)))
+  (let [h (aget m hash-cache-key)]
+    (if h
+      h
+      (let [h (loop [h 0 s (seq m)]
+                (if s
+                  (let [e (first s)]
+                    (recur (mod (+ h (bit-xor (hash (key e)) (hash (val e))))
+                                4503599627370496)
+                           (next s)))
+                  h))]
+        (aset m hash-cache-key h)
+        h))))
 
 (defn- hash-iset [s]
   ;; a la clojure.lang.APersistentSet
-  (loop [h 0 s (seq s)]
-    (if s
-      (let [e (first s)]
-        (recur (mod (+ h (hash e)) 4503599627370496)
-               (next s)))
-      h)))
+  (let [h (aget s hash-cache-key)]
+    (if h
+      h
+      (let [h (loop [h 0 s (seq s)]
+                (if s
+                  (let [e (first s)]
+                    (recur (mod (+ h (hash e)) 4503599627370496)
+                           (next s)))
+                  h))]
+        (aset s hash-cache-key h)
+        h))))
 
 (declare name)
 
