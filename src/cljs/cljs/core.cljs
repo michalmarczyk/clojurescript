@@ -195,6 +195,9 @@
 (defprotocol IReduce
   (-reduce [coll f] [coll f start]))
 
+(defprotocol IKVReduce
+  (-kv-reduce [coll f init]))
+
 (defprotocol IEquiv
   (-equiv [o other]))
 
@@ -882,6 +885,19 @@ reduces them without incurring seq initialization"
   ([f val coll]
      (-reduce coll f val)))
 
+(defn reduce-kv
+  "Reduces an associative collection. f should be a function of 3
+  arguments. Returns the result of applying f to init, the first key
+  and the first value in coll, then applying f to that result and the
+  2nd key and value, etc. If coll contains no entries, returns init
+  and f is not called. Note that reduce-kv is supported on vectors,
+  where the keys will be the ordinals."
+  ([f init coll]
+     (-kv-reduce coll f init)))
+
+(def ^:private ^:dynamic *kv-reduce-step*)
+(def ^:private ^:dynamic *kv-reduce-init*)
+
 ; simple reduce based on seqs, used as default
 (defn- seq-reduce
   ([f coll]
@@ -901,6 +917,20 @@ reduces them without incurring seq initialization"
        (seq-reduce f coll))
     ([coll f start]
        (seq-reduce f start coll))))
+
+(deftype Reduced [val]
+  IDeref
+  (-deref [o] val))
+
+(defn reduced?
+  "Returns true if x is the result of a call to reduced"
+  [r]
+  (instance? Reduced r))
+
+(defn reduced
+  "Wraps x in a way such that a reduce will terminate with the value x"
+  [x]
+  (Reduced. x))
 
 ;;; Math - variadic forms will not work until the following implemented:
 ;;; first, next, reduce
@@ -2389,7 +2419,7 @@ reduces them without incurring seq initialization"
              (pv-aset ret subidx nil)
              ret))))
 
-(declare tv-editable-root tv-editable-tail TransientVector)
+(declare tv-editable-root tv-editable-tail TransientVector deref)
 
 (deftype PersistentVector [meta cnt shift root tail ^:mutable __hash]
   Object
@@ -2497,6 +2527,25 @@ reduces them without incurring seq initialization"
     (ci-reduce v f))
   (-reduce [v f start]
     (ci-reduce v f start))
+
+  IKVReduce
+  (-kv-reduce [v f init]
+    (binding [*kv-reduce-step* 0
+              *kv-reduce-init* init]
+      (loop [i 0]
+        (if (< i cnt)
+          (let [arr (array-for v i)
+                len (.-length arr)]
+            (loop [j 0 init *kv-reduce-init*]
+              (if (< j len)
+                (let [init (f init (+ j i) (aget arr j))]
+                  (if (reduced? init)
+                    @init
+                    (recur (inc j) init)))
+                (do (set! *kv-reduce-step* len)
+                    (set! *kv-reduce-init* init))))
+            (recur (+ i *kv-reduce-step*)))
+          init))))
 
   IFn
   (-invoke [coll k]
@@ -3164,6 +3213,22 @@ reduces them without incurring seq initialization"
        (aset (.-arr editable) j b)
        editable)))
 
+(defn- inode-kv-reduce [arr f init]
+  (let [len (.-length arr)]
+    (loop [i 0 init init]
+      (if (< i len)
+        (let [init (let [k (aget arr i)]
+                     (if (coercive-not= k nil)
+                       (f init k (aget arr (inc i)))
+                       (let [node (aget arr (inc i))]
+                         (if (coercive-not= node nil)
+                           (.kv-reduce node f init)
+                           init))))]
+          (if (reduced? init)
+            @init
+            (recur (+ i 2) init)))
+        init))))
+
 (declare ArrayNode)
 
 (deftype BitmapIndexedNode [edit ^:mutable bitmap ^:mutable arr]
@@ -3357,7 +3422,10 @@ reduces them without incurring seq initialization"
                 (= key key-or-nil)
                 (do (aset removed-leaf? 0 true)
                     (.edit-and-remove-pair inode edit bit idx))
-                :else inode))))))
+                :else inode)))))
+
+  (kv-reduce [inode f init]
+    (inode-kv-reduce arr f init)))
 
 (set! cljs.core.BitmapIndexedNode/EMPTY (BitmapIndexedNode. nil 0 (make-array 0)))
 
@@ -3456,7 +3524,19 @@ reduces them without incurring seq initialization"
                 editable))
 
             :else
-            (edit-and-set inode edit idx n)))))))
+            (edit-and-set inode edit idx n))))))
+
+  (kv-reduce [inode f init]
+    (let [len (.-length arr)]           ; actually 32
+      (loop [i 0 init init]
+        (if (< i len)
+          (let [node (aget arr i)]
+            (if (coercive-not= node nil)
+              (let [init (.kv-reduce node f init)]
+                (if (reduced? init)
+                  @init
+                  (recur (inc i) init)))))
+          init)))))
 
 (defn- hash-collision-node-find-index [arr cnt key]
   (let [lim (* 2 cnt)]
@@ -3560,7 +3640,10 @@ reduces them without incurring seq initialization"
                 (aset earr (dec (* 2 cnt)) nil)
                 (aset earr (- (* 2 cnt) 2) nil)
                 (set! (.-cnt editable) (dec (.-cnt editable)))
-                editable)))))))
+                editable))))))
+
+  (kv-reduce [inode f init]
+    (inode-kv-reduce arr f init)))
 
 (defn- create-node
   ([shift key1 val1 key2hash key2 val2]
@@ -3774,6 +3857,14 @@ reduces them without incurring seq initialization"
             (if (identical? new-root root)
               coll
               (PersistentHashMap. meta (dec cnt) new-root has-nil? nil-val nil)))))
+
+  IKVReduce
+  (-kv-reduce [coll f init]
+    (let [init (if has-nil? (f init nil nil-val) init)]
+      (cond
+        (reduced? init)          @init
+        (coercive-not= nil root) (.kv-reduce root f init)
+        :else                    init)))
 
   IFn
   (-invoke [coll k]
@@ -4040,6 +4131,22 @@ reduces them without incurring seq initialization"
     :else
     (throw (js/Error. "red-black tree invariant violation"))))
 
+(defn- tree-map-kv-reduce [node f init]
+  (let [init (f init (.-key node) (.-val node))]
+    (if (reduced? init)
+      @init
+      (let [init (if (coercive-not= (.-left node) nil)
+                   (tree-map-kv-reduce (.-left node) f init)
+                   init)]
+        (if (reduced? init)
+          @init
+          (let [init (if (coercive-not= (.-right node) nil)
+                       (tree-map-kv-reduce (.-right node) f init)
+                       init)]
+            (if (reduced? init)
+              @init
+              init)))))))
+
 (deftype BlackNode [key val left right ^:mutable __hash]
   Object
   (toString [this]
@@ -4069,6 +4176,9 @@ reduces them without incurring seq initialization"
 
   (replace [node key val left right]
     (BlackNode. key val left right nil))
+
+  (kv-reduce [node f init]
+    (tree-map-kv-reduce node f init))
 
   (toString [this]
     (pr-str this))
@@ -4213,6 +4323,9 @@ reduces them without incurring seq initialization"
 
   (replace [node key val left right]
     (RedNode. key val left right nil))
+
+  (kv-reduce [node f init]
+    (tree-map-kv-reduce node f init))
 
   (toString [this]
     (pr-str this))
@@ -4432,6 +4545,12 @@ reduces them without incurring seq initialization"
 
   ICounted
   (-count [coll] cnt)
+
+  IKVReduce
+  (-kv-reduce [coll f init]
+    (if (coercive-not= tree nil)
+      (tree-map-kv-reduce tree f init)
+      init))
 
   IFn
   (-invoke [coll k]
