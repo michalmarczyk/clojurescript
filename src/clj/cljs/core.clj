@@ -550,12 +550,11 @@
         msym (symbol (core/str "-cljs$lang$protocol_mask$partition" part "$"))]
     `(let [~xsym ~x]
        (if (coercive-not= ~xsym nil)
-         (if (or ~(if bit `(unsafe-bit-and (. ~xsym ~msym) ~bit))
-                 ~(bool-expr `(. ~xsym ~(symbol (core/str "-" prefix)))))
-           true
-           (if (coercive-not (. ~xsym ~msym))
-             (cljs.core/type_satisfies_ ~psym ~xsym)
-             false))
+         (cond
+           ~(if bit `(unsafe-bit-and (. ~xsym ~msym) ~bit)) true
+           ~(bool-expr `(. ~xsym ~(symbol (core/str "-" prefix)))) true
+           (coercive-not (. ~xsym ~msym)) (cljs.core/type_satisfies_ ~psym ~xsym)
+           :else false)
          (cljs.core/type_satisfies_ ~psym ~xsym)))))
 
 (defmacro lazy-seq [& body]
