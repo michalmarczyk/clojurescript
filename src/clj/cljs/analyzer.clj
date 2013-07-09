@@ -214,7 +214,7 @@
 
 (declare analyze analyze-symbol analyze-seq)
 
-(def specials '#{if def fn* do let* loop* letfn* throw try* recur new set! ns deftype* defrecord* . js* & quote})
+(def specials '#{if def fn* do let* loop* letfn* throw try* recur recur-to new set! ns deftype* defrecord* . js* & quote})
 
 (def ^:dynamic *recur-frames* nil)
 (def ^:dynamic *loop-lets* nil)
@@ -467,49 +467,56 @@
      :children (conj (vec statements) ret)}))
 
 (defn analyze-let
-  [encl-env [_ bindings & exprs :as form] is-loop]
-  (assert (and (vector? bindings) (even? (count bindings))) "bindings must be vector of even number of elements")
-  (let [context (:context encl-env)
-        [bes env]
-        (disallowing-recur
-         (loop [bes []
-                env (assoc encl-env :context :expr)
-                bindings (seq (partition 2 bindings))]
-           (if-let [[name init] (first bindings)]
-             (do
-               (assert (not (or (namespace name) (.contains (str name) "."))) (str "Invalid local name: " name))
-               (let [init-expr (binding [*loop-lets* (cons {:params bes} (or *loop-lets* ()))]
-                                 (analyze env init))
-                     be {:name name
-                         :line (get-line name env)
-                         :column (get-col name env)
-                         :init init-expr
-                         :tag (or (-> name meta :tag)
-                                  (-> init-expr :tag)
-                                  (-> init-expr :info :tag))
-                         :local true
-                         :shadow (-> env :locals name)}
-                     be (if (= (:op init-expr) :fn)
-                          (merge be
-                            {:fn-var true
-                             :variadic (:variadic init-expr)
-                             :max-fixed-arity (:max-fixed-arity init-expr)
-                             :method-params (map :params (:methods init-expr))})
-                          be)]
-                 (recur (conj bes be)
-                        (assoc-in env [:locals name] be)
-                        (next bindings))))
-             [bes env])))
-        recur-frame (when is-loop {:params bes :flag (atom nil)})
-        expr
-        (binding [*recur-frames* (if recur-frame (cons recur-frame *recur-frames*) *recur-frames*)
-                  *loop-lets* (cond
-                               is-loop (or *loop-lets* ())
-                               *loop-lets* (cons {:params bes} *loop-lets*))]
-          (analyze (assoc env :context (if (= :expr context) :return context)) `(do ~@exprs)))]
-    {:env encl-env :op (if is-loop :loop :let)
-     :bindings bes :expr expr :form form
-     :children (conj (vec (map :init bes)) expr)}))
+  [encl-env [_ loop-name? bindings & exprs :as form] is-loop]
+  (let [loop-name (if (and is-loop (symbol? loop-name?)) loop-name?)
+        exprs     (if loop-name exprs (cons bindings exprs))
+        bindings  (if loop-name bindings loop-name?)]
+    (assert (and (vector? bindings) (even? (count bindings))) "bindings must be vector of even number of elements")
+    (let [context (:context encl-env)
+          [bes env]
+          (disallowing-recur
+           (loop [bes []
+                  env (assoc encl-env :context :expr)
+                  bindings (seq (partition 2 bindings))]
+             (if-let [[name init] (first bindings)]
+               (do
+                 (assert (not (or (namespace name) (.contains (str name) "."))) (str "Invalid local name: " name))
+                 (let [init-expr (binding [*loop-lets* (cons {:params bes} (or *loop-lets* ()))]
+                                   (analyze env init))
+                       be {:name name
+                           :line (get-line name env)
+                           :column (get-col name env)
+                           :init init-expr
+                           :tag (or (-> name meta :tag)
+                                    (-> init-expr :tag)
+                                    (-> init-expr :info :tag))
+                           :local true
+                           :shadow (-> env :locals name)}
+                       be (if (= (:op init-expr) :fn)
+                            (merge be
+                                   {:fn-var true
+                                    :variadic (:variadic init-expr)
+                                    :max-fixed-arity (:max-fixed-arity init-expr)
+                                    :method-params (map :params (:methods init-expr))})
+                            be)]
+                   (recur (conj bes be)
+                          (assoc-in env [:locals name] be)
+                          (next bindings))))
+               [bes env])))
+          recur-frame (when is-loop (merge {:params bes :flag (atom nil)}
+                                           (if loop-name
+                                             {:name loop-name})))
+          expr
+          (binding [*recur-frames* (if recur-frame (cons recur-frame *recur-frames*) *recur-frames*)
+                    *loop-lets* (cond
+                                  is-loop (or *loop-lets* ())
+                                  *loop-lets* (cons {:params bes} *loop-lets*))]
+            (analyze (assoc env :context (if (= :expr context) :return context)) `(do ~@exprs)))]
+      (merge {:env encl-env :op (if is-loop :loop :let)
+              :bindings bes :expr expr :form form
+              :children (conj (vec (map :init bes)) expr)}
+             (if is-loop
+               {:loop-name loop-name})))))
 
 (defmethod parse 'let*
   [op encl-env form _]
@@ -528,6 +535,22 @@
     (assert (= (count exprs) (count (:params frame))) "recur argument count mismatch")
     (reset! (:flag frame) true)
     (assoc {:env env :op :recur :form form}
+      :frame frame
+      :exprs exprs
+      :children exprs)))
+
+;(require 'clojure.pprint)
+(defmethod parse 'recur-to
+  [op env [_ loop-name & exprs :as form] _]
+  ;(clojure.pprint/pprint *recur-frames*)
+  (let [context (:context env)
+        frame (some #(if (= loop-name (:name %)) %)
+                    (take-while (comp not nil?) *recur-frames*))
+        exprs (disallowing-recur (vec (map #(analyze (assoc env :context :expr) %) exprs)))]
+    (assert frame "Can't recur here or no such loop name")
+    (assert (= (count exprs) (count (:params frame))) "recur argument count mismatch")
+    (reset! (:flag frame) true)
+    (assoc {:env env :op :recur-to :loop-name loop-name :form form}
       :frame frame
       :exprs exprs
       :children exprs)))

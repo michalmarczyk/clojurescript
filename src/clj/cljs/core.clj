@@ -140,13 +140,18 @@
   "Evaluates the exprs in a lexical context in which the symbols in
   the binding-forms are bound to their respective init-exprs or parts
   therein. Acts as a recur target."
-  [bindings & body]
+  [loop-name? bindings & body]
+  (assert-args
+    (or (core/symbol? loop-name?) (vector? loop-name?)) "a vector for its bindings and optionally a symbolic name")
+  (let [loop-name (if (core/symbol? loop-name?) loop-name?)
+        body      (if loop-name body (cons bindings body))
+        bindings  (if loop-name bindings loop-name?)]
     (assert-args
       (vector? bindings) "a vector for its binding"
       (even? (count bindings)) "an even number of forms in binding vector")
     (let [db (destructure bindings)]
       (if (= db bindings)
-        `(loop* ~bindings ~@body)
+        `(loop* ~@(if loop-name [loop-name]) ~bindings ~@body)
         (let [vs (take-nth 2 (drop 1 bindings))
               bs (take-nth 2 bindings)
               gs (map (fn [b] (if (core/symbol? b) b (gensym))) bs)
@@ -156,9 +161,10 @@
                               (conj ret g v b g)))
                           [] (map vector bs vs gs))]
           `(let ~bfs
-             (loop* ~(vec (interleave gs gs))
-               (let ~(vec (interleave bs gs))
-                 ~@body)))))))
+             (loop* ~@(if loop-name [loop-name])
+                    ~(vec (interleave gs gs))
+                    (let ~(vec (interleave bs gs))
+                      ~@body))))))))
 
 (def fast-path-protocols
   "protocol fqn -> [partition number, bit]"

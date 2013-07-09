@@ -519,7 +519,7 @@
       (emits try))))
 
 (defn emit-let
-  [{:keys [bindings expr env]} is-loop]
+  [{:keys [bindings expr env loop-name]} is-loop]
   (let [context (:context env)]
     (when (= :expr context) (emits "(function (){"))
     (binding [*lexical-renames* (into *lexical-renames*
@@ -529,10 +529,11 @@
                                              bindings)))]
       (doseq [{:keys [init] :as binding} bindings]
         (emitln "var " (munge binding) " = " init ";"))
+      (when (and is-loop loop-name) (emitln loop-name ":"))
       (when is-loop (emitln "while(true){"))
       (emits expr)
       (when is-loop
-        (emitln "break;")
+        (emitln "break" (if loop-name (str " " loop-name)) ";")
         (emitln "}")))
     (when (= :expr context) (emits "})()"))))
 
@@ -552,6 +553,18 @@
     (dotimes [i (count exprs)]
       (emitln (munge (params i)) " = " (temps i) ";"))
     (emitln "continue;")
+    (emitln "}")))
+
+(defmethod emit :recur-to
+  [{:keys [loop-name frame exprs env]}]
+  (let [temps (vec (take (count exprs) (repeatedly gensym)))
+        params (:params frame)]
+    (emitln "{")
+    (dotimes [i (count exprs)]
+      (emitln "var " (temps i) " = " (exprs i) ";"))
+    (dotimes [i (count exprs)]
+      (emitln (munge (params i)) " = " (temps i) ";"))
+    (emitln "continue " loop-name ";")
     (emitln "}")))
 
 (defmethod emit :letfn
